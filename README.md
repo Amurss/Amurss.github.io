@@ -301,7 +301,7 @@
     .slider-wrap {
       position: relative;
       width: 100%;
-      aspect-ratio: 4/3;
+      padding-top: 75%; /* 4:3 ratio — explicit height for all browsers */
       background: #0a0a0a;
       overflow: hidden;
     }
@@ -657,7 +657,8 @@
   const CACHE_TIME = 'tesla_cache_time';
   const CACHE_SS   = 'tesla_cache_ss';
   const CACHE_DBA  = 'tesla_cache_dba';
-  const FAVS_KEY   = 'tesla_favs';
+  const FAVS_KEY      = 'tesla_favs';
+  const FAVS_DATA_KEY = 'tesla_favs_data';
 
   function getTodayStr() {
     return new Date().toISOString().slice(0, 10);
@@ -695,16 +696,26 @@
 
   // ── Favorites ─────────────────────────────────────────────────────────────
   let favorites = new Set();
+  let favoritesData = {}; // url -> full listing object, persists across days
   function loadFavs() {
     try { favorites = new Set(JSON.parse(localStorage.getItem(FAVS_KEY) || '[]')); }
     catch { favorites = new Set(); }
+    try { favoritesData = JSON.parse(localStorage.getItem(FAVS_DATA_KEY) || '{}'); }
+    catch { favoritesData = {}; }
   }
   function saveFavs() {
     localStorage.setItem(FAVS_KEY, JSON.stringify([...favorites]));
+    localStorage.setItem(FAVS_DATA_KEY, JSON.stringify(favoritesData));
   }
   function toggleFav(url) {
-    if (favorites.has(url)) favorites.delete(url);
-    else favorites.add(url);
+    if (favorites.has(url)) {
+      favorites.delete(url);
+      delete favoritesData[url];
+    } else {
+      favorites.add(url);
+      const listing = allListings.find(l => l.url === url);
+      if (listing) favoritesData[url] = listing;
+    }
     saveFavs();
     const card = document.querySelector(`.card[data-url="${CSS.escape(url)}"]`);
     if (card) {
@@ -715,6 +726,13 @@
     if (filterState.favOnly) applyFilters();
   }
   window.toggleFav = toggleFav;
+
+  // Inject saved favorites that aren't in today's fresh listings
+  function mergeWithFavorites(listings) {
+    const urlSet = new Set(listings.map(l => l.url));
+    const saved = Object.values(favoritesData).filter(l => favorites.has(l.url) && !urlSet.has(l.url));
+    return [...listings, ...saved];
+  }
 
   // ── Filter state ──────────────────────────────────────────────────────────
   const filterState = {
@@ -994,7 +1012,7 @@
       let tm;
       while ((tm = titleRe.exec(row)) !== null) {
         const t = tm[1].trim();
-        if (!/^[\d,.\s€]+$/.test(t)) { title = t; break; }
+        if (!/^[\d,.\s€]+$/.test(t) && /^[A-Za-z]/.test(t)) { title = t; break; }
       }
       const priceM = row.match(/([\d\s]{3,}\s*€)/);
       const price = priceM ? priceM[1].replace(/\s+/g, ' ').trim() : '';
@@ -1500,7 +1518,7 @@
       const cachedDba = getCachedSource(CACHE_DBA) || [];
       const combined  = [...cachedSs, ...cachedDba];
       if (combined.length > 0) {
-        renderListings(combined);
+        renderListings(mergeWithFavorites(combined));
         return;
       }
     }
@@ -1515,7 +1533,7 @@
 
     const ssListings  = ssResult.status  === 'fulfilled' ? ssResult.value  : [];
     const dbaListings = dbaResult.status === 'fulfilled' ? dbaResult.value : [];
-    const combined    = [...ssListings, ...dbaListings];
+    const combined    = mergeWithFavorites([...ssListings, ...dbaListings]);
 
     stampCache();
     setCacheSource(CACHE_SS,  ssListings);
