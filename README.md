@@ -1,4 +1,4 @@
-# Amurss.github.io
+#Amurss.github.io
 
 <!DOCTYPE html>
 <html lang="en">
@@ -1332,7 +1332,7 @@
     }
 
     const slides = images.map(src =>
-      `<div class="slide"><img src="${src}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'"></div>`
+      `<div class="slide"><img src="${src}" loading="lazy" referrerpolicy="no-referrer" onerror="if(!this.dataset.tried){this.dataset.tried=1;this.src='https://corsproxy.io/?${src}'}else{this.parentElement.innerHTML='<div class=\\'no-img\\'>🚗</div>'}"></div>`
     ).join('');
 
     const dots = images.length > 1
@@ -1564,4 +1564,3 @@
 </script>
 </body>
 </html>
-
