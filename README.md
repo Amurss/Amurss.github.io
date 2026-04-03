@@ -1,5 +1,3 @@
-#Amurss.github.io
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -433,6 +431,11 @@
       overflow: hidden;
     }
 
+    .posted-time {
+      font-size: 0.72rem;
+      color: #555;
+    }
+
     .card-meta {
       display: flex;
       flex-wrap: wrap;
@@ -659,13 +662,46 @@
   const CACHE_DBA  = 'tesla_cache_dba';
   const FAVS_KEY      = 'tesla_favs';
   const FAVS_DATA_KEY = 'tesla_favs_data';
+  const SEEN_KEY      = 'tesla_seen'; // { url: ISO timestamp of first seen }
+
+  function loadSeen() {
+    try { return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}'); }
+    catch { return {}; }
+  }
+
+  function stampSeen(listings) {
+    const seen = loadSeen();
+    const now  = new Date().toISOString();
+    let changed = false;
+    for (const l of listings) {
+      if (!seen[l.url]) { seen[l.url] = now; changed = true; }
+      l.addedAt = seen[l.url];
+    }
+    if (changed) localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+    return listings;
+  }
+
+  function formatAddedAt(iso) {
+    if (!iso) return '';
+    const d    = new Date(iso);
+    const now  = new Date();
+    const hm   = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    const diffDays = Math.floor((now - d) / 86400000);
+    if (diffDays === 0) return `Today at ${hm}`;
+    if (diffDays === 1) return `Yesterday at ${hm}`;
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) + ` at ${hm}`;
+  }
 
   function getTodayStr() {
     return new Date().toISOString().slice(0, 10);
   }
 
+  const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
   function isCacheValid() {
-    return localStorage.getItem(CACHE_DATE) === getTodayStr();
+    const ts = localStorage.getItem(CACHE_TIME);
+    if (!ts) return false;
+    return (Date.now() - new Date(ts).getTime()) < CACHE_TTL_MS;
   }
 
   function getCachedSource(key) {
@@ -681,13 +717,15 @@
 
   function stampCache() {
     const now = new Date();
-    const t = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
     localStorage.setItem(CACHE_DATE, getTodayStr());
-    localStorage.setItem(CACHE_TIME, t);
+    localStorage.setItem(CACHE_TIME, now.toISOString());
   }
 
   function getCacheTime() {
-    return localStorage.getItem(CACHE_TIME) || '';
+    const iso = localStorage.getItem(CACHE_TIME);
+    if (!iso) return '';
+    const d = new Date(iso);
+    return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
   }
 
   function clearCache() {
@@ -904,7 +942,7 @@
 
   document.getElementById('load-more-btn').addEventListener('click', loadMore);
 
-  document.getElementById('refresh-btn').addEventListener('click', () => {
+  function triggerRefresh(msg) {
     clearCache();
     allListings   = [];
     renderedCount = 0;
@@ -916,10 +954,14 @@
     document.getElementById('count').style.display = 'none';
     document.getElementById('updated-label').style.display = 'none';
     document.getElementById('loading').style.display = 'flex';
-    document.getElementById('loading-msg').textContent = 'Loading listings…';
+    document.getElementById('loading-msg').textContent = msg || 'Loading listings…';
     document.getElementById('refresh-btn').disabled = true;
     init();
-  });
+  }
+
+  document.getElementById('refresh-btn').addEventListener('click', () => triggerRefresh('Loading listings…'));
+
+  setInterval(() => triggerRefresh('Auto-refreshing listings…'), CACHE_TTL_MS);
 
   // ── Helpers ───────────────────────────────────────────────────────────────
   function detectModel(title) {
@@ -1020,7 +1062,9 @@
       const mileage = mileM ? mileM[1] : '';
       const yearM = row.match(/\b(19|20)\d{2}\b/);
       const year = yearM ? yearM[0] : '';
-      listings.push({ url, thumb, title, price, mileage, year });
+      const dtM = row.match(/\b(\d{2}\.\d{2}\.\d{4})\s+(\d{2}:\d{2})\b/) || row.match(/\b(\d{2}:\d{2})\b/);
+      const posted = dtM ? dtM[0] : '';
+      listings.push({ url, thumb, title, price, mileage, year, posted });
     }
 
     if (listings.length === 0) {
@@ -1039,8 +1083,10 @@
         const mileage = mileM ? mileM[1] : '';
         const yearM = block.match(/\b(19|20)\d{2}\b/);
         const year = yearM ? yearM[0] : '';
+        const dtM = block.match(/\b(\d{2}\.\d{2}\.\d{4})\s+(\d{2}:\d{2})\b/) || block.match(/\b(\d{2}:\d{2})\b/);
+        const posted = dtM ? dtM[0] : '';
         if (!listings.find(l => l.url === url)) {
-          listings.push({ url, thumb, title, price, mileage, year });
+          listings.push({ url, thumb, title, price, mileage, year, posted });
         }
       }
     }
@@ -1097,7 +1143,11 @@
     const modM = html.match(/<title>[^-]*-\s*([^<]+?)\s*-[^<]*<\/title>/i);
     if (modM) model = modM[1].trim(); // e.g. "Tesla Model 3"
 
-    return { images, price, mileage, year, model };
+    let posted = '';
+    const pdM = norm.match(/(?:Datums|Publicēts|Pievienots)[\s\S]{0,80}?(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)/i);
+    if (pdM) posted = pdM[1].trim();
+
+    return { images, price, mileage, year, model, posted };
   }
 
   // ── dba.dk parser ────────────────────────────────────────────────────────
@@ -1128,6 +1178,16 @@
       }
     }
     return null;
+  }
+
+  function formatDbaDate(raw) {
+    if (!raw) return '';
+    try {
+      const d = new Date(raw);
+      if (isNaN(d)) return '';
+      return d.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })
+           + ' ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    } catch { return ''; }
   }
 
   function normalizeDbaItem(item) {
@@ -1201,7 +1261,12 @@
       if (thumb) images = [String(typeof thumb === 'object' ? (thumb.url || thumb.src || '') : thumb)].filter(Boolean);
     }
 
-    return { url, title, price, mileage, year, model: '', images, source: 'dba' };
+    let posted = '';
+    const rawDate = item.createdAt || item.created || item.publishedAt || item.datePosted
+                  || item.listingDate || item.timestamp || item.activatedAt || item.date;
+    if (rawDate) posted = formatDbaDate(rawDate);
+
+    return { url, title, price, mileage, year, model: '', images, source: 'dba', posted };
   }
 
   function parseDbaPage(html) {
@@ -1274,6 +1339,11 @@
                 const imgRe = /https?:\/\/[^"'\s>]*dbastatic[^"'\s>]*\.(?:jpg|jpeg|png|webp)/gi;
                 let imgM;
                 while ((imgM = imgRe.exec(ctx)) !== null) extraImgs.add(imgM[0]);
+                // Posted date
+                if (!normalized.posted) {
+                  const dateCtxM = ctx.match(/"(?:createdAt|created|publishedAt|datePosted|activatedAt|timestamp|listingDate)"\s*:\s*"([^"]+)"/);
+                  if (dateCtxM) normalized.posted = formatDbaDate(dateCtxM[1]);
+                }
                 searchFrom = idx + 1;
               }
               if (extraImgs.size > normalized.images.length) normalized.images = [...extraImgs];
@@ -1298,11 +1368,12 @@
       seen.add(url);
       const ctx = html.slice(Math.max(0, m.index - 800), m.index + 2000);
       if (!firstCtxLogged) { console.log('[dba debug] first url:', url, '\nctx sample:', ctx.slice(0, 500)); firstCtxLogged = true; }
-      const priceM = ctx.match(/"(?:price|amount|priceCash|listPrice|buyNowPrice)"\s*:\s*"?([\d.,]+)"?/);
-      const yearM  = ctx.match(/"(?:year|modelYear|registrationYear)"\s*:\s*(\d{4})/);
-      const mileM  = ctx.match(/"(?:mileage|kilometertal|kilometerstand|odometer|kilometers|km|milage|mileageFromOdometer)"\s*:\s*"?([\d.,]+)"?/);
-      const titleM = ctx.match(/"(?:heading|name|title|label)"\s*:\s*"([^"]{5,120})"/);
-      const imgM   = ctx.match(/"(?:url|src|originalUrl|largeUrl|imageUrl|image_url)"\s*:\s*"(https?:\/\/[^"]*(?:dbastatic|dba\.dk|dba-static)[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"/i);
+      const priceM  = ctx.match(/"(?:price|amount|priceCash|listPrice|buyNowPrice)"\s*:\s*"?([\d.,]+)"?/);
+      const yearM   = ctx.match(/"(?:year|modelYear|registrationYear)"\s*:\s*(\d{4})/);
+      const mileM   = ctx.match(/"(?:mileage|kilometertal|kilometerstand|odometer|kilometers|km|milage|mileageFromOdometer)"\s*:\s*"?([\d.,]+)"?/);
+      const titleM  = ctx.match(/"(?:heading|name|title|label)"\s*:\s*"([^"]{5,120})"/);
+      const imgM    = ctx.match(/"(?:url|src|originalUrl|largeUrl|imageUrl|image_url)"\s*:\s*"(https?:\/\/[^"]*(?:dbastatic|dba\.dk|dba-static)[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"/i);
+      const dateM   = ctx.match(/"(?:createdAt|created|publishedAt|datePosted|activatedAt|timestamp|listingDate)"\s*:\s*"([^"]+)"/);
       // Strip all non-digits to handle Danish dot-separated thousands (299.000 → 299000)
       const priceNum = priceM ? parseInt(priceM[1].replace(/\D/g, ''), 10) : null;
       const mileNum  = mileM  ? parseInt(mileM[1].replace(/\D/g, ''), 10)  : null;
@@ -1313,11 +1384,31 @@
         year: yearM ? yearM[1] : '',
         mileage: (mileNum != null && !isNaN(mileNum)) ? mileNum.toLocaleString('da-DK') + ' km' : '',
         images: imgM ? [imgM[1]] : [],
+        posted: dateM ? formatDbaDate(dateM[1]) : '',
         source: 'dba'
       });
     }
     return listings;
   }
+
+  // ── Image fallback with proxy chain ──────────────────────────────────────
+  const IMG_PROXIES = [
+    src => 'https://corsproxy.io/?' + src,
+    src => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(src),
+    src => 'https://thingproxy.freeboard.io/fetch/' + src,
+  ];
+
+  function imgFallback(el) {
+    const src     = el.dataset.src;
+    const attempt = parseInt(el.dataset.attempt || '0');
+    if (attempt < IMG_PROXIES.length) {
+      el.dataset.attempt = attempt + 1;
+      el.src = IMG_PROXIES[attempt](src);
+    } else {
+      el.parentElement.innerHTML = '<div class="no-img">🚗</div>';
+    }
+  }
+  window.imgFallback = imgFallback;
 
   // ── Render helpers ────────────────────────────────────────────────────────
   function makeSlider(images, url) {
@@ -1332,7 +1423,7 @@
     }
 
     const slides = images.map(src =>
-      `<div class="slide"><img src="${src}" loading="lazy" referrerpolicy="no-referrer" onerror="if(!this.dataset.tried){this.dataset.tried=1;this.src='https://corsproxy.io/?${src}'}else{this.parentElement.innerHTML='<div class=\\'no-img\\'>🚗</div>'}"></div>`
+      `<div class="slide"><img src="${src}" referrerpolicy="no-referrer" onerror="imgFallback(this)" data-src="${src}"></div>`
     ).join('');
 
     const dots = images.length > 1
@@ -1370,7 +1461,7 @@
   window.slide = slide;
 
   function makeCard(info) {
-    const { url, title, price, mileage, year, model, images, source } = info;
+    const { url, title, price, mileage, year, model, images, source, posted } = info;
     // ss.com uses relative paths; dba.dk provides full URLs
     const fullUrl   = source === 'dba' ? url : SS_BASE + url;
     const cardUrl   = url; // used as unique key for favorites / data-url
@@ -1380,9 +1471,11 @@
     const yearNum   = year ? parseInt(year) : '';
 
     const displayTitle = title || (model ? `Tesla ${model}` : 'Tesla');
-    const yearTag  = year    ? `<div class="tag"><span class="icon">📅</span>${year}</div>` : '';
-    const mileTag  = mileage ? `<div class="tag"><span class="icon">🛣️</span>${mileage}</div>` : '';
-    const modelTag = `<div class="tag model-tag">${modelName}</div>`;
+    const yearTag   = year    ? `<div class="tag"><span class="icon">📅</span>${year}</div>` : '';
+    const mileTag   = mileage ? `<div class="tag"><span class="icon">🛣️</span>${mileage}</div>` : '';
+    const modelTag  = `<div class="tag model-tag">${modelName}</div>`;
+    const addedAt   = info.addedAt ? formatAddedAt(info.addedAt) : '';
+    const postedTag = addedAt ? `<div class="posted-time">🕐 Added ${addedAt}</div>` : '';
     const srcLabel  = source === 'dba' ? 'dba.dk' : 'ss.com';
     const srcClass  = source === 'dba' ? 'dba' : 'ss';
 
@@ -1397,6 +1490,7 @@
         ${makeSlider(images, cardUrl)}
         <div class="card-body">
           <div class="card-title">${displayTitle}</div>
+          ${postedTag}
           <div class="card-meta">
             ${modelTag}${yearTag}${mileTag}
           </div>
@@ -1491,11 +1585,12 @@
           mileage: d.mileage || l.mileage,
           year: d.year || l.year,
           model: d.model,
+          posted: d.posted || l.posted,
           images: d.images.length > 0 ? d.images : (l.thumb ? [l.thumb.replace('.th2.jpg', '.800.jpg')] : [])
         };
       } catch {
         return { url: l.url, source: 'ss', title: l.title, price: l.price,
-                 mileage: l.mileage, year: l.year, model: '', images: l.thumb ? [l.thumb] : [] };
+                 mileage: l.mileage, year: l.year, model: '', posted: l.posted || '', images: l.thumb ? [l.thumb] : [] };
       }
     }));
   }
@@ -1518,7 +1613,7 @@
       const cachedDba = getCachedSource(CACHE_DBA) || [];
       const combined  = [...cachedSs, ...cachedDba];
       if (combined.length > 0) {
-        renderListings(mergeWithFavorites(combined));
+        renderListings(stampSeen(mergeWithFavorites(combined)));
         return;
       }
     }
@@ -1533,7 +1628,7 @@
 
     const ssListings  = ssResult.status  === 'fulfilled' ? ssResult.value  : [];
     const dbaListings = dbaResult.status === 'fulfilled' ? dbaResult.value : [];
-    const combined    = mergeWithFavorites([...ssListings, ...dbaListings]);
+    const combined    = stampSeen(mergeWithFavorites([...ssListings, ...dbaListings]));
 
     stampCache();
     setCacheSource(CACHE_SS,  ssListings);
