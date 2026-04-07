@@ -523,6 +523,34 @@
     #load-more-btn:hover { border-color: #e82127; color: #e82127; background: #1a0808; }
     #load-more-btn:disabled { opacity: 0.4; cursor: default; }
 
+    /* ── TELEGRAM SETTINGS ── */
+    .tg-row {
+      display: flex;
+      gap: 6px;
+      margin-top: 2px;
+    }
+    #tg-save-btn, #tg-test-btn {
+      flex: 1;
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      color: #888;
+      font-size: 0.75rem;
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    #tg-save-btn:hover { border-color: #555; color: #ccc; }
+    #tg-test-btn:hover { border-color: #e82127; color: #e82127; }
+    #tg-status {
+      font-size: 0.7rem;
+      min-height: 14px;
+      margin-top: 4px;
+      color: #555;
+    }
+    #tg-status.ok  { color: #4a9; }
+    #tg-status.err { color: #e66; }
+
     /* ── RESPONSIVE ── */
     @media (max-width: 700px) {
       #grid { grid-template-columns: 1fr; }
@@ -621,6 +649,20 @@
       <button id="clear-btn">✕ Clear filters <span id="active-count"></span></button>
     </div>
 
+    <div class="sidebar-divider"></div>
+
+    <div class="filter-section">
+      <div class="filter-label">Telegram Alerts</div>
+      <input class="filter-input" id="tg-token" type="password" placeholder="Bot token" autocomplete="off">
+      <input class="filter-input" id="tg-chatid" type="text" placeholder="Chat ID" autocomplete="off" style="margin-top:6px">
+      <div class="tg-row">
+        <button id="tg-save-btn">Save</button>
+        <button id="tg-test-btn">Test</button>
+      </div>
+      <button id="tg-getid-btn" style="width:100%;margin-top:6px;background:#1a1a1a;border:1px solid #2a2a2a;color:#888;font-size:0.75rem;padding:6px 8px;border-radius:6px;cursor:pointer;transition:border-color 0.15s,color 0.15s" onmouseover="this.style.borderColor='#555';this.style.color='#ccc'" onmouseout="this.style.borderColor='#2a2a2a';this.style.color='#888'">↓ Fetch Chat ID from bot</button>
+      <div id="tg-status"></div>
+    </div>
+
   </div>
 
   <!-- MAIN CONTENT -->
@@ -663,18 +705,87 @@
   const FAVS_KEY      = 'tesla_favs';
   const FAVS_DATA_KEY = 'tesla_favs_data';
   const SEEN_KEY      = 'tesla_seen'; // { url: ISO timestamp of first seen }
+  const TG_CONFIG_KEY = 'tesla_tg_config';
+
+  // ── Telegram helpers ──────────────────────────────────────────────────────
+  function getTgConfig() {
+    try { return JSON.parse(localStorage.getItem(TG_CONFIG_KEY) || '{}'); }
+    catch { return {}; }
+  }
+
+  function saveTgConfig(token, chatId) {
+    localStorage.setItem(TG_CONFIG_KEY, JSON.stringify({ token, chatId }));
+  }
+
+  function escHtml(s) {
+    return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  async function tgApi(token, method, body) {
+    const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    return r.json();
+  }
+
+  async function notifyNewListings(listings) {
+    if (!listings || listings.length === 0) return;
+    const { token, chatId } = getTgConfig();
+    if (!token || !chatId) return;
+
+    for (const l of listings) {
+      const fullUrl = l.source === 'dba' ? l.url : SS_BASE + l.url;
+      const caption = [
+        `🚗 <b>${escHtml(l.title || 'New Tesla listing')}</b>`,
+        l.price   ? `💰 ${escHtml(l.price)}`   : '',
+        l.mileage ? `🛣 ${escHtml(l.mileage)}` : '',
+        l.year    ? `📅 ${l.year}`              : '',
+        `<a href="${fullUrl}">View listing ↗</a>`
+      ].filter(Boolean).join('\n');
+
+      try {
+        if (l.images && l.images.length > 0) {
+          const res = await tgApi(token, 'sendPhoto', {
+            chat_id: chatId, photo: l.images[0], caption, parse_mode: 'HTML'
+          });
+          if (!res.ok) {
+            // Photo URL rejected by Telegram — fall back to text
+            await tgApi(token, 'sendMessage', {
+              chat_id: chatId, text: caption, parse_mode: 'HTML'
+            });
+          }
+        } else {
+          await tgApi(token, 'sendMessage', {
+            chat_id: chatId, text: caption, parse_mode: 'HTML'
+          });
+        }
+      } catch (e) {
+        console.warn('[telegram] notification failed:', e.message);
+      }
+    }
+  }
 
   function loadSeen() {
     try { return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}'); }
     catch { return {}; }
   }
 
+  let _newListings = []; // populated by stampSeen, consumed by notifyNewListings
+
   function stampSeen(listings) {
     const seen = loadSeen();
+    const isFirstRun = Object.keys(seen).length === 0; // don't spam on very first load
     const now  = new Date().toISOString();
     let changed = false;
+    _newListings = [];
     for (const l of listings) {
-      if (!seen[l.url]) { seen[l.url] = now; changed = true; }
+      if (!seen[l.url]) {
+        seen[l.url] = now;
+        changed = true;
+        if (!isFirstRun) _newListings.push(l);
+      }
       l.addedAt = seen[l.url];
     }
     if (changed) localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
@@ -1614,6 +1725,7 @@
       const combined  = [...cachedSs, ...cachedDba];
       if (combined.length > 0) {
         renderListings(stampSeen(mergeWithFavorites(combined)));
+        notifyNewListings(_newListings);
         return;
       }
     }
@@ -1653,7 +1765,86 @@
     }
 
     renderListings(combined);
+    notifyNewListings(_newListings);
   }
+
+  // ── Telegram UI ───────────────────────────────────────────────────────────
+  (function initTgUI() {
+    const tokenEl  = document.getElementById('tg-token');
+    const chatEl   = document.getElementById('tg-chatid');
+    const saveBtn  = document.getElementById('tg-save-btn');
+    const testBtn  = document.getElementById('tg-test-btn');
+    const statusEl = document.getElementById('tg-status');
+
+    // Restore saved config
+    const cfg = getTgConfig();
+    if (cfg.token)  tokenEl.value = cfg.token;
+    if (cfg.chatId) chatEl.value  = cfg.chatId;
+
+    function setStatus(msg, type) {
+      statusEl.textContent = msg;
+      statusEl.className   = type || '';
+    }
+
+    saveBtn.addEventListener('click', () => {
+      const token  = tokenEl.value.trim();
+      const chatId = chatEl.value.trim();
+      if (!token || !chatId) { setStatus('Enter token and chat ID.', 'err'); return; }
+      saveTgConfig(token, chatId);
+      setStatus('Saved.', 'ok');
+      setTimeout(() => setStatus(''), 2000);
+    });
+
+    document.getElementById('tg-getid-btn').addEventListener('click', async () => {
+      const token = tokenEl.value.trim();
+      if (!token) { setStatus('Enter bot token first.', 'err'); return; }
+      setStatus('Send any message to your bot now, then click again…');
+      const btn = document.getElementById('tg-getid-btn');
+      btn.disabled = true;
+      try {
+        const r = await fetch(`https://api.telegram.org/bot${token}/getUpdates`);
+        const res = await r.json();
+        if (!res.ok) { setStatus('Error: ' + (res.description || 'unknown'), 'err'); btn.disabled = false; return; }
+        const updates = res.result || [];
+        if (updates.length === 0) {
+          setStatus('No messages found. Send your bot a message first, then try again.', 'err');
+          btn.disabled = false;
+          return;
+        }
+        const chatId = String(updates[updates.length - 1].message?.chat?.id || updates[updates.length - 1].channel_post?.chat?.id || '');
+        if (!chatId) { setStatus('Could not extract chat ID. Try sending the bot a message.', 'err'); btn.disabled = false; return; }
+        chatEl.value = chatId;
+        saveTgConfig(token, chatId);
+        setStatus('Chat ID set to ' + chatId, 'ok');
+      } catch (e) {
+        setStatus('Failed: ' + e.message, 'err');
+      }
+      btn.disabled = false;
+    });
+
+    testBtn.addEventListener('click', async () => {
+      const token  = tokenEl.value.trim();
+      const chatId = chatEl.value.trim();
+      if (!token || !chatId) { setStatus('Enter token and chat ID first.', 'err'); return; }
+      testBtn.disabled = true;
+      setStatus('Sending…');
+      try {
+        const res = await tgApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: '✅ Tesla Listings bot connected!\nYou will receive alerts for new listings.',
+          parse_mode: 'HTML'
+        });
+        if (res.ok) {
+          setStatus('Test message sent!', 'ok');
+        } else {
+          setStatus('Error: ' + (res.description || 'unknown'), 'err');
+        }
+      } catch (e) {
+        setStatus('Failed: ' + e.message, 'err');
+      }
+      testBtn.disabled = false;
+    });
+  })();
 
   init();
 </script>
