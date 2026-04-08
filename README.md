@@ -1502,15 +1502,26 @@
     return listings;
   }
 
-  // ── Image fallback with proxy chain ──────────────────────────────────────
-  // ss.com CDN returns a tiny white placeholder pixel (not an HTTP error) for
-  // hotlinked images, so onerror never fires. We detect it via naturalWidth on
-  // the load event and kick off the proxy chain from there.
+  // ── Image loading ─────────────────────────────────────────────────────────
+  // ss.com CDN blocks hotlinked images and returns a tiny white placeholder
+  // pixel (no HTTP error, so onerror never fires on the raw URL).
+  // images.weserv.nl is a purpose-built image proxy that bypasses this —
+  // it fetches and re-serves images with proper CORS headers.
+  // Fallback chain kicks in if weserv also fails.
   const IMG_PROXIES = [
     src => 'https://corsproxy.io/?' + src,
     src => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(src),
     src => 'https://thingproxy.freeboard.io/fetch/' + src,
   ];
+
+  function wsrvUrl(src) {
+    return 'https://images.weserv.nl/?url=' + encodeURIComponent(src);
+  }
+
+  function imgSrc(src) {
+    // Route ss.com images through weserv from the start; dba images load fine directly
+    return src && src.includes('ss.com') ? wsrvUrl(src) : src;
+  }
 
   function imgFallback(el) {
     const src     = el.dataset.src;
@@ -1525,7 +1536,7 @@
   window.imgFallback = imgFallback;
 
   function imgLoaded(el) {
-    // naturalWidth < 10 means ss.com served a blank placeholder pixel
+    // naturalWidth < 10 means a blank placeholder pixel slipped through
     if (el.naturalWidth < 10 || el.naturalHeight < 10) imgFallback(el);
   }
   window.imgLoaded = imgLoaded;
@@ -1543,7 +1554,7 @@
     }
 
     const slides = images.map(src =>
-      `<div class="slide"><img src="${src}" referrerpolicy="no-referrer" onload="imgLoaded(this)" onerror="imgFallback(this)" data-src="${src}"></div>`
+      `<div class="slide"><img src="${imgSrc(src)}" onload="imgLoaded(this)" onerror="imgFallback(this)" data-src="${src}"></div>`
     ).join('');
 
     const dots = images.length > 1
