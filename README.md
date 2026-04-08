@@ -1503,6 +1503,9 @@
   }
 
   // ── Image fallback with proxy chain ──────────────────────────────────────
+  // ss.com CDN returns a tiny white placeholder pixel (not an HTTP error) for
+  // hotlinked images, so onerror never fires. We detect it via naturalWidth on
+  // the load event and kick off the proxy chain from there.
   const IMG_PROXIES = [
     src => 'https://corsproxy.io/?' + src,
     src => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(src),
@@ -1521,6 +1524,12 @@
   }
   window.imgFallback = imgFallback;
 
+  function imgLoaded(el) {
+    // naturalWidth < 10 means ss.com served a blank placeholder pixel
+    if (el.naturalWidth < 10 || el.naturalHeight < 10) imgFallback(el);
+  }
+  window.imgLoaded = imgLoaded;
+
   // ── Render helpers ────────────────────────────────────────────────────────
   function makeSlider(images, url) {
     const favActive = favorites.has(url);
@@ -1534,7 +1543,7 @@
     }
 
     const slides = images.map(src =>
-      `<div class="slide"><img src="${src}" referrerpolicy="no-referrer" onerror="imgFallback(this)" data-src="${src}"></div>`
+      `<div class="slide"><img src="${src}" referrerpolicy="no-referrer" onload="imgLoaded(this)" onerror="imgFallback(this)" data-src="${src}"></div>`
     ).join('');
 
     const dots = images.length > 1
@@ -1845,6 +1854,57 @@
       testBtn.disabled = false;
     });
   })();
+
+  // ── Background poll for new listings (Telegram notifications) ────────────
+  // Runs every 5 min independently of the 1-hour display cache.
+  // Only fetches the lightweight main pages (no detail-page requests).
+  const NOTIFY_POLL_MS = 5 * 60 * 1000;
+
+  async function pollForNewListings() {
+    const { token, chatId } = getTgConfig();
+    if (!token || !chatId) return; // Telegram not configured — skip
+
+    const seen = loadSeen();
+    if (Object.keys(seen).length === 0) return; // First-run guard — nothing seen yet
+
+    const newListings = [];
+    const now = new Date().toISOString();
+    let changed = false;
+
+    const [ssResult, dbaResult] = await Promise.allSettled([
+      fetchHtml(SS_URL),
+      fetchHtml(DBA_URL)
+    ]);
+
+    if (ssResult.status === 'fulfilled') {
+      for (const l of parseMainPage(ssResult.value)) {
+        if (!seen[l.url]) {
+          seen[l.url] = now;
+          changed = true;
+          newListings.push({ ...l, source: 'ss', images: l.thumb ? [l.thumb] : [] });
+        }
+      }
+    }
+
+    if (dbaResult.status === 'fulfilled') {
+      for (const l of parseDbaPage(dbaResult.value)) {
+        if (!seen[l.url]) {
+          seen[l.url] = now;
+          changed = true;
+          newListings.push(l);
+        }
+      }
+    }
+
+    if (changed) localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+
+    if (newListings.length > 0) {
+      await notifyNewListings(newListings);
+      triggerRefresh('New listings found — refreshing…');
+    }
+  }
+
+  setInterval(pollForNewListings, NOTIFY_POLL_MS);
 
   init();
 </script>
